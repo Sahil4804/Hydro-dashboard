@@ -16,6 +16,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from lulc_sediment_release import (
+    compute_lulc_summary,
+    compute_sediment_yield,
+    compute_water_release_decision,
+    compute_sedimentation_trend,
+    WaterReleaseInput,
+)
 from config import (
     DATA_DIR, MODELS_DIR, LAT, LON, CATCHMENT_AREA_KM2,
     CLIMATE_MODEL, HIST_START_YEAR, HIST_END_YEAR,
@@ -1381,6 +1388,98 @@ def get_forecast():
         "summary": summary,
         "source": "Open-Meteo Forecast API; streamflow predicted via SVR model trained on 1985–2024 data",
     }
+from fastapi import Body
+from typing import Optional, Dict
+from pydantic import BaseModel
+
+
+# ======================== LULC ========================
+class LulcAreasInput(BaseModel):
+    areas: Optional[dict] = None
+
+
+class SedimentYieldInput(BaseModel):
+    annual_precip_mm: Optional[float] = 724.0
+    rusle_c_override: Optional[float] = None
+    lulc_areas: Optional[dict] = None
+
+
+@app.post("/api/lulc/composition")
+def lulc_composition(body: LulcAreasInput = None):
+    """
+    Return LULC area breakdown with composite CN, RUSLE C-factor, and
+    estimated runoff coefficient for Himayat Sagar catchment.
+    Optionally supply custom area percentages for scenario analysis.
+    """
+    from lulc_sediment_release import compute_lulc_summary
+    areas = body.areas if body else None
+    return compute_lulc_summary(areas)
+
+
+@app.post("/api/lulc/sediment-yield")
+def sediment_yield(body: SedimentYieldInput = None):
+    """
+    Estimate catchment sediment yield (RUSLE method) and reservoir sedimentation.
+    Returns zone-wise SYI classification per CWC (2010) thresholds.
+    """
+    from lulc_sediment_release import compute_sediment_yield
+    if body is None:
+        body = SedimentYieldInput()
+    return compute_sediment_yield(
+        annual_precip_mm=body.annual_precip_mm or 724.0,
+        rusle_c_override=body.rusle_c_override,
+        lulc_areas=body.lulc_areas,
+    )
+
+
+@app.get("/api/lulc/sedimentation-trend")
+def sedimentation_trend():
+    """
+    Return historical and projected sedimentation trend for Himayat Sagar
+    from commission year (1927) to present, with known survey anchor points.
+    """
+    from lulc_sediment_release import compute_sedimentation_trend
+    return compute_sedimentation_trend()
+
+
+# ======================== WATER RELEASE DECISIONS ========================
+
+class WaterReleaseRequest(BaseModel):
+    current_storage_mm3: float
+    inflow_forecast_m3s: float
+    downstream_demand_m3s: float
+    days_to_decide: Optional[int] = 7
+    current_wl_m: Optional[float] = None
+    rainfall_forecast_72h_mm: Optional[float] = 0.0
+    irrigation_requirement_mm3: Optional[float] = None
+    drinking_water_requirement_mm3: Optional[float] = None
+
+
+@app.post("/api/water-release/decision")
+def water_release_decision(body: WaterReleaseRequest):
+    """
+    Compute rule-curve based water release recommendation for Himayat Sagar.
+
+    Evaluates four release priorities in sequence:
+      1. Mandatory flood safety release (IS 7966:1975)
+      2. Demand-based controlled release (ICOLD Bulletin 147)
+      3. Conservation / minimum pool protection (CWC guidelines)
+      4. Environmental flow (MoEFCC 2018)
+
+    Also flags sediment flushing opportunity if conditions are met.
+    """
+    from lulc_sediment_release import compute_water_release_decision, WaterReleaseInput
+    inp = WaterReleaseInput(
+        current_storage_mm3=body.current_storage_mm3,
+        inflow_forecast_m3s=body.inflow_forecast_m3s,
+        downstream_demand_m3s=body.downstream_demand_m3s,
+        days_to_decide=body.days_to_decide or 7,
+        current_wl_m=body.current_wl_m,
+        rainfall_forecast_72h_mm=body.rainfall_forecast_72h_mm,
+        irrigation_requirement_mm3=body.irrigation_requirement_mm3,
+        drinking_water_requirement_mm3=body.drinking_water_requirement_mm3,
+    )
+    return compute_water_release_decision(inp)
 
 
 if __name__ == "__main__":
