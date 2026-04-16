@@ -1122,6 +1122,17 @@ def flood_alert_assess(data: FloodAlertInput):
 
 # ======================== MAP CONTEXT ========================
 
+@app.get("/api/map/catchment")
+def map_catchment():
+    """Return the delineated catchment boundary GeoJSON."""
+    path = DATA_DIR / "catchment_boundary.geojson"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Catchment boundary not available")
+    import json as _json
+    with open(path) as f:
+        return _json.load(f)
+
+
 @app.get("/api/map/context")
 def map_context():
     """Consolidated data for the interactive map page."""
