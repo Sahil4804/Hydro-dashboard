@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, CloudRain, Activity, Brain, TrendingUp,
   Waves, GitCompare, BookOpen, ChevronDown, Droplets,
-  FlaskConical, Siren,
+  FlaskConical, Siren, Map,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
@@ -81,6 +81,16 @@ export function Sidebar() {
         >
           <Activity className="h-4 w-4" />
           7-Day Forecast
+        </Link>
+        <Link
+          href="/map"
+          className={cn(
+            "flex items-center gap-3 px-4 py-2.5 text-sm transition-colors",
+            pathname === "/map" ? "bg-slate-800 text-sky-400" : "text-slate-300 hover:bg-slate-800 hover:text-white"
+          )}
+        >
+          <Map className="h-4 w-4" />
+          Catchment Map
         </Link>
 
         {/* Nav Groups */}

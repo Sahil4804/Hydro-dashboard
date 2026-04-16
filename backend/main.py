@@ -1120,6 +1120,97 @@ def flood_alert_assess(data: FloodAlertInput):
     }
 
 
+# ======================== MAP CONTEXT ========================
+
+@app.get("/api/map/context")
+def map_context():
+    """Consolidated data for the interactive map page."""
+    result: dict = {
+        "location": {"lat": LAT, "lon": LON, "name": "Himayat Sagar Dam"},
+        "catchment_area_km2": CATCHMENT_AREA_KM2,
+        "catchment_radius_m": int((CATCHMENT_AREA_KM2 / 3.14159) ** 0.5 * 1000),
+        "landmarks": [
+            {"name": "Himayat Sagar Dam", "lat": 17.345, "lon": 78.401, "type": "dam"},
+            {"name": "Hyderabad City", "lat": 17.385, "lon": 78.486, "type": "city"},
+            {"name": "Osman Sagar", "lat": 17.379, "lon": 78.305, "type": "reservoir"},
+            {"name": "Musi River (upstream)", "lat": 17.37, "lon": 78.33, "type": "river"},
+            {"name": "Musi River (downstream)", "lat": 17.36, "lon": 78.50, "type": "river"},
+            {"name": "Esi River confluence", "lat": 17.35, "lon": 78.38, "type": "river"},
+        ],
+    }
+
+    # Current conditions from forecast
+    try:
+        import requests as _req
+        from datetime import date, timedelta
+        today = date.today()
+        url = "https://api.open-meteo.com/v1/forecast"
+        params = {
+            "latitude": LAT, "longitude": LON, "timezone": "Asia/Kolkata",
+            "current": ["temperature_2m", "relative_humidity_2m", "precipitation",
+                        "cloud_cover", "wind_speed_10m"],
+        }
+        resp = _req.get(url, params=params, timeout=15)
+        if resp.ok:
+            current = resp.json().get("current", {})
+            result["current_weather"] = {
+                "temp_c": current.get("temperature_2m"),
+                "humidity_pct": current.get("relative_humidity_2m"),
+                "precip_mm": current.get("precipitation"),
+                "cloud_pct": current.get("cloud_cover"),
+                "wind_kmh": current.get("wind_speed_10m"),
+            }
+    except Exception:
+        result["current_weather"] = None
+
+    # Monthly climatology for animation
+    if data_ready():
+        try:
+            hp = read_csv("historical_monthly_precip.csv")
+            hs = read_csv("historical_monthly_streamflow.csv")
+
+            precip_clim = hp.groupby("month")["rain_mm"].mean()
+            stream_clim = hs.groupby("month")["streamflow_m3s"].mean()
+            temp_clim = hp.groupby("month")["temp_mean_c"].mean()
+
+            result["monthly_climatology"] = []
+            month_names = ["Jan","Feb","Mar","Apr","May","Jun",
+                           "Jul","Aug","Sep","Oct","Nov","Dec"]
+            for m in range(1, 13):
+                result["monthly_climatology"].append({
+                    "month": m,
+                    "name": month_names[m-1],
+                    "precip_mm": round(float(precip_clim.get(m, 0)), 1),
+                    "streamflow_m3s": round(float(stream_clim.get(m, 0)), 2),
+                    "temp_c": round(float(temp_clim.get(m, 0)), 1),
+                })
+
+            # Annual stats for context
+            annual_precip = hp.groupby("year")["rain_mm"].sum()
+            annual_stream = hs.groupby("year")["streamflow_m3s"].mean()
+            result["annual_stats"] = {
+                "mean_precip_mm": round(float(annual_precip.mean()), 1),
+                "mean_streamflow_m3s": round(float(annual_stream.mean()), 2),
+                "max_precip_year": int(annual_precip.idxmax()),
+                "min_precip_year": int(annual_precip.idxmin()),
+            }
+
+            # Risk level
+            risk_data = integrated_risk()
+            result["risk"] = {
+                "hist_dry_months": risk_data["historical"]["dry_months"],
+                "hist_wet_months": risk_data["historical"]["wet_months"],
+            }
+            if "projected" in risk_data:
+                result["risk"]["proj_dry_months"] = risk_data["projected"]["dry_months"]
+                result["risk"]["proj_wet_months"] = risk_data["projected"]["wet_months"]
+
+        except Exception:
+            pass
+
+    return result
+
+
 # ======================== SHORT-TERM FORECAST ========================
 
 @app.get("/api/forecast")
