@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, CloudRain, Activity, Brain, TrendingUp,
   Waves, GitCompare, BookOpen, ChevronDown, Droplets,
-  FlaskConical, Siren, Map,
+  FlaskConical, Siren, Layers, Mountain, Sliders,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
@@ -35,6 +35,14 @@ const navGroups: NavGroup[] = [
       { label: "Future Projections", href: "/streamflow/future", icon: TrendingUp },
     ],
   },
+  {
+    label: "Land & Sediment",
+    icon: Layers,
+    items: [
+      { label: "LULC Analysis", href: "/lulc", icon: Layers },
+      { label: "Sediment Yield Index", href: "/sediment-yield", icon: Mountain },
+    ],
+  },
 ];
 
 export function Sidebar() {
@@ -42,6 +50,7 @@ export function Sidebar() {
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
     Precipitation: true,
     Streamflow: true,
+    "Land & Sediment": true,
   });
 
   const toggleGroup = (label: string) => {
@@ -82,16 +91,6 @@ export function Sidebar() {
           <Activity className="h-4 w-4" />
           7-Day Forecast
         </Link>
-        <Link
-          href="/map"
-          className={cn(
-            "flex items-center gap-3 px-4 py-2.5 text-sm transition-colors",
-            pathname === "/map" ? "bg-slate-800 text-sky-400" : "text-slate-300 hover:bg-slate-800 hover:text-white"
-          )}
-        >
-          <Map className="h-4 w-4" />
-          Catchment Map
-        </Link>
 
         {/* Nav Groups */}
         {navGroups.map((group) => (
@@ -129,6 +128,23 @@ export function Sidebar() {
             )}
           </div>
         ))}
+
+        {/* Reservoir Operations */}
+        <div className="mt-3 border-t border-slate-700 pt-3">
+          <p className="px-4 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+            Reservoir Operations
+          </p>
+          <Link
+            href="/water-release"
+            className={cn(
+              "flex items-center gap-3 px-4 py-2.5 text-sm transition-colors",
+              pathname === "/water-release" ? "bg-slate-800 text-sky-400" : "text-slate-300 hover:bg-slate-800 hover:text-white"
+            )}
+          >
+            <Sliders className="h-4 w-4" />
+            Water Release Decisions
+          </Link>
+        </div>
 
         {/* Bottom links */}
         <div className="mt-1">
