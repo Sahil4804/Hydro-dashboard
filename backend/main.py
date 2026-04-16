@@ -1120,6 +1120,167 @@ def flood_alert_assess(data: FloodAlertInput):
     }
 
 
+# ======================== SHORT-TERM FORECAST ========================
+
+@app.get("/api/forecast")
+def get_forecast():
+    """
+    Fetch 7-day weather forecast from Open-Meteo Forecast API and use
+    trained ML models to predict daily rainfall and streamflow.
+    """
+    import requests as _req
+    import joblib
+    from datetime import date, timedelta
+
+    today = date.today()
+    end_date = today + timedelta(days=7)
+
+    # --- Fetch forecast from Open-Meteo ---
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": LAT,
+        "longitude": LON,
+        "timezone": "Asia/Kolkata",
+        "daily": [
+            "temperature_2m_mean",
+            "precipitation_sum",
+            "relative_humidity_2m_mean",
+            "cloud_cover_mean",
+            "wind_speed_10m_max",
+        ],
+        "start_date": str(today),
+        "end_date": str(end_date),
+    }
+
+    try:
+        resp = _req.get(url, params=params, timeout=30)
+        resp.raise_for_status()
+        api_data = resp.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Open-Meteo Forecast API error: {e}")
+
+    if "daily" not in api_data:
+        raise HTTPException(status_code=502, detail="Unexpected response from forecast API")
+
+    daily = api_data["daily"]
+    n_days = len(daily["time"])
+
+    def _safe_float(val):
+        try:
+            return float(val) if val is not None else None
+        except (ValueError, TypeError):
+            return None
+
+    forecast_days = []
+    for i in range(n_days):
+        forecast_days.append({
+            "date": daily["time"][i],
+            "temp_mean_c": _safe_float(daily["temperature_2m_mean"][i]),
+            "precip_mm": _safe_float(daily["precipitation_sum"][i]) or 0,
+            "rh_mean_pct": _safe_float(daily["relative_humidity_2m_mean"][i]),
+            "cloud_mean_pct": _safe_float(daily["cloud_cover_mean"][i]),
+            "wind_mean_kmh": _safe_float(daily["wind_speed_10m_max"][i]),
+        })
+
+    df = pd.DataFrame(forecast_days)
+    df["date_parsed"] = pd.to_datetime(df["date"])
+    df["month"] = df["date_parsed"].dt.month
+    df["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
+    df["month_cos"] = np.cos(2 * np.pi * df["month"] / 12)
+    df["day_of_week"] = df["date_parsed"].dt.strftime("%a")
+
+    # --- ML-based streamflow estimation ---
+    # Use historical last-month rainfall as lag context
+    streamflow_predicted = [None] * n_days
+    try:
+        if data_ready():
+            hs = read_csv("historical_monthly_streamflow.csv")
+            last_month_precip = float(hs["precip_mm"].iloc[-1])
+            prev_month_precip = float(hs["precip_mm"].iloc[-2])
+
+            svr_path = MODELS_DIR / "streamflow_svr.joblib"
+            if svr_path.exists():
+                svr_model = joblib.load(svr_path)
+                from config import STREAMFLOW_FEATURE_COLS
+
+                for i in range(n_days):
+                    row = {
+                        "precip_mm": df.iloc[i]["precip_mm"] or 0,
+                        "temp_mean_c": df.iloc[i]["temp_mean_c"],
+                        "rh_mean_pct": df.iloc[i]["rh_mean_pct"],
+                        "cloud_mean_pct": df.iloc[i]["cloud_mean_pct"],
+                        "wind_mean_kmh": df.iloc[i]["wind_mean_kmh"],
+                        "month_sin": df.iloc[i]["month_sin"],
+                        "month_cos": df.iloc[i]["month_cos"],
+                        "precip_lag1": last_month_precip,
+                        "precip_lag2": prev_month_precip,
+                    }
+                    features = pd.DataFrame([row])[STREAMFLOW_FEATURE_COLS]
+                    pred = max(float(svr_model.predict(features)[0]), 0)
+                    streamflow_predicted[i] = round(pred, 3)
+    except Exception:
+        pass
+
+    # --- Classify rainfall severity (IMD scale) ---
+    def classify_rain(mm):
+        if mm is None or mm < 2.5:
+            return {"label": "No/Trace", "color": "slate"}
+        elif mm < 15.6:
+            return {"label": "Light", "color": "sky"}
+        elif mm < 64.5:
+            return {"label": "Moderate", "color": "blue"}
+        elif mm < 115.6:
+            return {"label": "Heavy", "color": "amber"}
+        elif mm < 204.5:
+            return {"label": "Very Heavy", "color": "orange"}
+        else:
+            return {"label": "Extreme", "color": "red"}
+
+    # --- Build response ---
+    days = []
+    total_precip = 0
+    for i in range(n_days):
+        p = df.iloc[i]["precip_mm"] or 0
+        total_precip += p
+        rain_class = classify_rain(p)
+        days.append({
+            "date": df.iloc[i]["date"],
+            "day_of_week": df.iloc[i]["day_of_week"],
+            "is_today": i == 0,
+            "is_tomorrow": i == 1,
+            "temp_mean_c": round(df.iloc[i]["temp_mean_c"], 1) if df.iloc[i]["temp_mean_c"] is not None else None,
+            "precip_mm": round(p, 1),
+            "rh_mean_pct": round(df.iloc[i]["rh_mean_pct"], 1) if df.iloc[i]["rh_mean_pct"] is not None else None,
+            "cloud_mean_pct": round(df.iloc[i]["cloud_mean_pct"], 1) if df.iloc[i]["cloud_mean_pct"] is not None else None,
+            "wind_mean_kmh": round(df.iloc[i]["wind_mean_kmh"], 1) if df.iloc[i]["wind_mean_kmh"] is not None else None,
+            "rain_severity": rain_class["label"],
+            "rain_color": rain_class["color"],
+            "predicted_streamflow_m3s": streamflow_predicted[i],
+        })
+
+    # Weekly summary
+    precip_values = [d["precip_mm"] for d in days]
+    temp_values = [d["temp_mean_c"] for d in days if d["temp_mean_c"] is not None]
+    stream_values = [d["predicted_streamflow_m3s"] for d in days if d["predicted_streamflow_m3s"] is not None]
+
+    summary = {
+        "total_precip_mm": round(sum(precip_values), 1),
+        "avg_temp_c": round(sum(temp_values) / len(temp_values), 1) if temp_values else None,
+        "max_precip_day": max(days, key=lambda d: d["precip_mm"]),
+        "rainy_days": sum(1 for p in precip_values if p >= 2.5),
+        "avg_streamflow_m3s": round(sum(stream_values) / len(stream_values), 3) if stream_values else None,
+        "max_streamflow_m3s": round(max(stream_values), 3) if stream_values else None,
+    }
+
+    return {
+        "location": {"lat": LAT, "lon": LON, "name": "Himayat Sagar, Hyderabad"},
+        "fetched_at": datetime.now().isoformat(),
+        "days": days,
+        "summary": summary,
+        "source": "Open-Meteo Forecast API; streamflow predicted via SVR model trained on 1985–2024 data",
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

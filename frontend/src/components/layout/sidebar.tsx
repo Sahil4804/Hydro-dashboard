@@ -72,6 +72,16 @@ export function Sidebar() {
           <LayoutDashboard className="h-4 w-4" />
           Overview
         </Link>
+        <Link
+          href="/forecast"
+          className={cn(
+            "flex items-center gap-3 px-4 py-2.5 text-sm transition-colors",
+            pathname === "/forecast" ? "bg-slate-800 text-sky-400" : "text-slate-300 hover:bg-slate-800 hover:text-white"
+          )}
+        >
+          <Activity className="h-4 w-4" />
+          7-Day Forecast
+        </Link>
 
         {/* Nav Groups */}
         {navGroups.map((group) => (
