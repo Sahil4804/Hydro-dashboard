@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, CloudRain, Activity, Brain, TrendingUp,
   Waves, GitCompare, BookOpen, ChevronDown, Droplets,
+  FlaskConical, Siren,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
@@ -130,6 +131,33 @@ export function Sidebar() {
           >
             <BookOpen className="h-4 w-4" />
             Methodology
+          </Link>
+        </div>
+
+        {/* Alerts & Safety */}
+        <div className="mt-3 border-t border-slate-700 pt-3">
+          <p className="px-4 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+            Alerts &amp; Safety
+          </p>
+          <Link
+            href="/water-quality"
+            className={cn(
+              "flex items-center gap-3 px-4 py-2.5 text-sm transition-colors",
+              pathname === "/water-quality" ? "bg-slate-800 text-sky-400" : "text-slate-300 hover:bg-slate-800 hover:text-white"
+            )}
+          >
+            <FlaskConical className="h-4 w-4" />
+            Water Quality
+          </Link>
+          <Link
+            href="/flood-alert"
+            className={cn(
+              "flex items-center gap-3 px-4 py-2.5 text-sm transition-colors",
+              pathname === "/flood-alert" ? "bg-slate-800 text-sky-400" : "text-slate-300 hover:bg-slate-800 hover:text-white"
+            )}
+          >
+            <Siren className="h-4 w-4" />
+            Flood Alert
           </Link>
         </div>
       </nav>

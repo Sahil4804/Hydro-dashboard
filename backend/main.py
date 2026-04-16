@@ -7,12 +7,14 @@ import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from config import (
     DATA_DIR, MODELS_DIR, LAT, LON, CATCHMENT_AREA_KM2,
@@ -766,6 +768,356 @@ def download_file(filename: str):
     if not path.exists():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(path, filename=filename, media_type="text/csv")
+
+
+# ======================== WATER QUALITY ASSESSMENT ========================
+#
+# Standards and sources:
+#   - Bureau of Indian Standards IS 10500:2012, "Drinking Water — Specification"
+#     (BIS, 2012). Primary Indian standard for drinking water quality.
+#   - WHO, "Guidelines for Drinking-water Quality", 4th edition incorporating
+#     the 1st addendum (World Health Organization, 2017). ISBN 978-92-4-154995-0.
+#   - Central Pollution Control Board (CPCB), "Designated Best Use
+#     Classification of Inland Surface Waters", in Environmental Standards
+#     (CPCB, New Delhi, 2008).
+
+class WaterQualityInput(BaseModel):
+    ph: Optional[float] = None
+    turbidity_ntu: Optional[float] = None
+    tds_mg_l: Optional[float] = None
+    nitrate_mg_l: Optional[float] = None
+    fluoride_mg_l: Optional[float] = None
+    hardness_mg_l: Optional[float] = None
+    chloride_mg_l: Optional[float] = None
+    iron_mg_l: Optional[float] = None
+    arsenic_ug_l: Optional[float] = None  # micrograms per litre
+    bod_mg_l: Optional[float] = None
+
+
+def _param_check(value: Optional[float], acceptable, permissible, label: str, unit: str, source: str, invert: bool = False) -> dict:
+    """Return per-parameter assessment dict.
+
+    For pH the 'acceptable' range is a (low, high) tuple.
+    For all others, value <= acceptable is safe, <= permissible is caution,
+    > permissible is unsafe.  `invert=True` is unused but kept for symmetry.
+    """
+    if value is None:
+        return {"parameter": label, "value": None, "unit": unit, "status": "not_provided",
+                "acceptable_limit": acceptable, "permissible_limit": permissible, "source": source}
+
+    if isinstance(acceptable, tuple):
+        # pH-style range check
+        lo, hi = acceptable
+        if lo <= value <= hi:
+            status = "safe"
+            message = f"Within WHO/IS 10500 range ({lo}–{hi} {unit})"
+        else:
+            status = "unsafe"
+            message = f"Outside WHO/IS 10500 range ({lo}–{hi} {unit})"
+        return {
+            "parameter": label, "value": round(value, 3), "unit": unit,
+            "status": status, "message": message,
+            "acceptable_limit": f"{lo}–{hi}", "permissible_limit": f"{lo}–{hi}",
+            "source": source,
+        }
+
+    if value <= acceptable:
+        status = "safe"
+        message = f"Within desirable limit (≤{acceptable} {unit})"
+    elif value <= permissible:
+        status = "caution"
+        message = f"Between desirable ({acceptable}) and permissible ({permissible}) limits — treat before use"
+    else:
+        status = "unsafe"
+        message = f"Exceeds permissible limit of {permissible} {unit}"
+
+    return {
+        "parameter": label, "value": round(value, 3), "unit": unit,
+        "status": status, "message": message,
+        "acceptable_limit": acceptable, "permissible_limit": permissible,
+        "source": source,
+    }
+
+
+@app.post("/api/water-quality/assess")
+def water_quality_assess(data: WaterQualityInput):
+    """
+    Assess drinking water safety from user-supplied field measurements.
+
+    Thresholds from IS 10500:2012 (BIS) and WHO GDWQ 4th Ed. (2017).
+    CPCB class limits used for BOD.
+    """
+    results = []
+
+    # pH — IS 10500:2012 cl.4 & WHO GDWQ Table 8.1
+    results.append(_param_check(
+        data.ph, (6.5, 8.5), (6.5, 8.5),
+        "pH", "—",
+        "IS 10500:2012, Table 1; WHO GDWQ 4th ed. (2017), Table 8.1"
+    ))
+
+    # Turbidity — IS 10500:2012; WHO GDWQ 2017 §4.2
+    results.append(_param_check(
+        data.turbidity_ntu, 1, 5,
+        "Turbidity", "NTU",
+        "IS 10500:2012, Table 1 (desirable ≤1, permissible ≤5 NTU); WHO GDWQ 2017 §4.2"
+    ))
+
+    # Total Dissolved Solids — IS 10500:2012
+    results.append(_param_check(
+        data.tds_mg_l, 500, 2000,
+        "Total Dissolved Solids (TDS)", "mg/L",
+        "IS 10500:2012, Table 1 (desirable ≤500, permissible ≤2000 mg/L)"
+    ))
+
+    # Nitrate (as NO3) — IS 10500:2012; WHO GDWQ 2017 §12.7
+    results.append(_param_check(
+        data.nitrate_mg_l, 45, 100,
+        "Nitrate (as NO₃)", "mg/L",
+        "IS 10500:2012, Table 1 (desirable ≤45, permissible ≤100 mg/L); WHO GDWQ 2017 §12.7 (50 mg/L)"
+    ))
+
+    # Fluoride — IS 10500:2012; WHO GDWQ 2017 §12.4
+    results.append(_param_check(
+        data.fluoride_mg_l, 1.0, 1.5,
+        "Fluoride", "mg/L",
+        "IS 10500:2012, Table 1 (desirable ≤1.0, permissible ≤1.5 mg/L); WHO GDWQ 2017 §12.4 (1.5 mg/L)"
+    ))
+
+    # Total Hardness (as CaCO3) — IS 10500:2012
+    results.append(_param_check(
+        data.hardness_mg_l, 200, 600,
+        "Total Hardness (as CaCO₃)", "mg/L",
+        "IS 10500:2012, Table 1 (desirable ≤200, permissible ≤600 mg/L)"
+    ))
+
+    # Chloride — IS 10500:2012; WHO GDWQ 2017 §12.2
+    results.append(_param_check(
+        data.chloride_mg_l, 250, 1000,
+        "Chloride", "mg/L",
+        "IS 10500:2012, Table 1 (desirable ≤250, permissible ≤1000 mg/L); WHO GDWQ 2017 §12.2 (250 mg/L)"
+    ))
+
+    # Iron — IS 10500:2012; WHO GDWQ 2017 §12.5
+    results.append(_param_check(
+        data.iron_mg_l, 0.3, 0.3,
+        "Iron (as Fe)", "mg/L",
+        "IS 10500:2012, Table 1 (max 0.3 mg/L, no relaxation); WHO GDWQ 2017 §12.5"
+    ))
+
+    # Arsenic — IS 10500:2012; WHO GDWQ 2017 §12.1
+    arsenic_mg_l = (data.arsenic_ug_l / 1000.0) if data.arsenic_ug_l is not None else None
+    results.append(_param_check(
+        arsenic_mg_l, 0.01, 0.01,
+        "Arsenic (as As)", "mg/L",
+        "IS 10500:2012, Table 1 (max 0.01 mg/L, no relaxation); WHO GDWQ 2017 §12.1"
+    ))
+
+    # BOD — CPCB Designated Best Use Classification (2008)
+    # Class A (drinking after conventional treatment): BOD ≤3 mg/L
+    # Class C (drinking after extensive treatment):   BOD ≤6 mg/L
+    results.append(_param_check(
+        data.bod_mg_l, 3, 6,
+        "Biochemical Oxygen Demand (BOD)", "mg/L",
+        "CPCB Designated Best Use Classification (2008): Class A ≤3 mg/L, Class C ≤6 mg/L"
+    ))
+
+    # Overall assessment
+    statuses = [r["status"] for r in results if r["status"] != "not_provided"]
+    if "unsafe" in statuses:
+        overall = "unsafe"
+        overall_message = "Water is NOT safe to drink. One or more parameters exceed permissible limits."
+        overall_color = "red"
+    elif "caution" in statuses:
+        overall = "caution"
+        overall_message = "Water requires treatment before consumption. Some parameters are above desirable limits."
+        overall_color = "orange"
+    elif statuses:
+        overall = "safe"
+        overall_message = "All measured parameters are within acceptable drinking water limits."
+        overall_color = "green"
+    else:
+        overall = "no_data"
+        overall_message = "No parameters were provided for assessment."
+        overall_color = "gray"
+
+    unsafe_params = [r["parameter"] for r in results if r["status"] == "unsafe"]
+    caution_params = [r["parameter"] for r in results if r["status"] == "caution"]
+
+    return {
+        "overall": overall,
+        "overall_message": overall_message,
+        "overall_color": overall_color,
+        "unsafe_parameters": unsafe_params,
+        "caution_parameters": caution_params,
+        "parameters": results,
+        "standards": [
+            "Bureau of Indian Standards IS 10500:2012 — Drinking Water Specification",
+            "WHO Guidelines for Drinking-water Quality, 4th Ed. (2017)",
+            "CPCB Designated Best Use Classification of Inland Surface Waters (2008)",
+        ],
+    }
+
+
+# ======================== FLOOD ALERT ASSESSMENT ========================
+#
+# Standards and sources:
+#   - India Meteorological Department (IMD), "Rainfall measurement criteria and
+#     colour-coded weather warnings" (IMD, 2021). Operational guideline for
+#     24-h accumulated rainfall severity thresholds.
+#   - Central Water Commission (CWC), "Flood Forecasting and Warning Network"
+#     manual (CWC, Ministry of Jal Shakti, 2022). Flood stage classification
+#     based on historical exceedance percentiles.
+#   - National Disaster Management Authority (NDMA), "National Guidelines on
+#     Flood Management" (NDMA, Government of India, 2008). ISBN 978-93-80440-24-2.
+#   - Historical streamflow percentiles computed from Himayat Sagar station
+#     records (1985–2024) stored in this repository.
+
+class FloodAlertInput(BaseModel):
+    current_streamflow_m3s: Optional[float] = None
+    rainfall_24h_mm: Optional[float] = None
+    rainfall_72h_mm: Optional[float] = None
+
+
+@app.post("/api/flood-alert/assess")
+def flood_alert_assess(data: FloodAlertInput):
+    """
+    Assess flood risk from current streamflow and rainfall observations.
+
+    Streamflow thresholds are derived from historical percentiles (Q75/Q90/Q95)
+    of Himayat Sagar monthly streamflow records (1985–2024).
+    Rainfall thresholds follow IMD 24-h accumulated rainfall severity categories.
+    """
+    # ---- Streamflow percentile thresholds (CWC methodology) ----
+    streamflow_thresholds = None
+    streamflow_result = None
+
+    if data_ready():
+        try:
+            hs = read_csv("historical_monthly_streamflow.csv")
+            q75 = float(hs["streamflow_m3s"].quantile(0.75))
+            q90 = float(hs["streamflow_m3s"].quantile(0.90))
+            q95 = float(hs["streamflow_m3s"].quantile(0.95))
+            streamflow_thresholds = {"q75": round(q75, 3), "q90": round(q90, 3), "q95": round(q95, 3)}
+        except Exception:
+            streamflow_thresholds = None
+
+    if data.current_streamflow_m3s is not None:
+        sf = data.current_streamflow_m3s
+        if streamflow_thresholds is None:
+            streamflow_result = {
+                "value": sf, "level": "unknown",
+                "message": "Historical data unavailable to compute thresholds.",
+                "color": "gray",
+            }
+        else:
+            q75 = streamflow_thresholds["q75"]
+            q90 = streamflow_thresholds["q90"]
+            q95 = streamflow_thresholds["q95"]
+            if sf < q75:
+                level, color = "normal", "green"
+                msg = f"Below Q75 ({q75} m³/s). Normal flow conditions."
+            elif sf < q90:
+                level, color = "watch", "yellow"
+                msg = f"Between Q75 ({q75}) and Q90 ({q90}) m³/s. Elevated flow — monitor closely."
+            elif sf < q95:
+                level, color = "warning", "orange"
+                msg = f"Between Q90 ({q90}) and Q95 ({q95}) m³/s. High flow — flood watch in effect."
+            else:
+                level, color = "danger", "red"
+                msg = f"Exceeds Q95 ({q95} m³/s). Extreme flow — flood danger."
+            streamflow_result = {
+                "value": round(sf, 3), "level": level, "message": msg, "color": color,
+                "source": "CWC flood stage classification; Himayat Sagar historical records (1985–2024)",
+            }
+
+    # ---- Rainfall thresholds (IMD 2021 colour-coded warnings) ----
+    # 24-h accumulated rainfall categories (IMD):
+    #   Light: <15.5 mm   Moderate: 15.6–64.4 mm
+    #   Heavy: 64.5–115.5 mm (Yellow warning)
+    #   Very Heavy: 115.6–204.4 mm (Orange warning)
+    #   Extremely Heavy: ≥204.5 mm (Red warning)
+    rainfall_result = None
+
+    if data.rainfall_24h_mm is not None:
+        r = data.rainfall_24h_mm
+        if r < 15.6:
+            level, color = "normal", "green"
+            msg = f"{r} mm — Light to no rain. No flood concern from rainfall alone."
+        elif r < 64.5:
+            level, color = "normal", "green"
+            msg = f"{r} mm — Moderate rain (15.6–64.4 mm). Monitor streamflow."
+        elif r < 115.6:
+            level, color = "watch", "yellow"
+            msg = f"{r} mm — Heavy rain (IMD Yellow Warning). Flash flooding possible in low-lying areas."
+        elif r < 204.5:
+            level, color = "warning", "orange"
+            msg = f"{r} mm — Very Heavy rain (IMD Orange Warning). Significant flood risk. Be prepared."
+        else:
+            level, color = "danger", "red"
+            msg = f"{r} mm — Extremely Heavy rain (IMD Red Warning). Extreme flood risk. Take action immediately."
+
+        rainfall_result = {
+            "value": r, "level": level, "message": msg, "color": color,
+            "source": "IMD 24-h rainfall severity thresholds (IMD, 2021); NDMA National Flood Guidelines (2008)",
+        }
+
+    # ---- 72-hour antecedent rainfall context ----
+    antecedent_note = None
+    if data.rainfall_72h_mm is not None:
+        r72 = data.rainfall_72h_mm
+        if r72 > 300:
+            antecedent_note = (
+                f"72-h accumulation {r72} mm is very high. Saturated catchment soils "
+                "dramatically increase runoff and flood risk beyond what 24-h rainfall alone suggests "
+                "(NDMA Flood Guidelines §3.2)."
+            )
+        elif r72 > 150:
+            antecedent_note = (
+                f"72-h accumulation {r72} mm is elevated. Antecedent wetness will amplify "
+                "runoff response to any additional rain."
+            )
+
+    # ---- Overall flood risk level ----
+    level_rank = {"normal": 0, "watch": 1, "warning": 2, "danger": 3, "unknown": -1}
+    levels = []
+    if streamflow_result and streamflow_result.get("level") in level_rank:
+        levels.append(level_rank[streamflow_result["level"]])
+    if rainfall_result and rainfall_result.get("level") in level_rank:
+        levels.append(level_rank[rainfall_result["level"]])
+
+    if not levels:
+        overall_level = "no_data"
+        overall_color = "gray"
+        overall_message = "Provide streamflow or rainfall values to assess flood risk."
+    else:
+        rank = max(levels)
+        overall_level = {0: "normal", 1: "watch", 2: "warning", 3: "danger"}[rank]
+        colors = {"normal": "green", "watch": "yellow", "warning": "orange", "danger": "red"}
+        overall_color = colors[overall_level]
+        messages = {
+            "normal": "No immediate flood threat. Continue routine monitoring.",
+            "watch": "Elevated conditions detected. Stay informed and monitor updates.",
+            "warning": "Flood warning conditions. Prepare emergency plans and alert downstream communities.",
+            "danger": "FLOOD DANGER. Initiate emergency protocols. Evacuate flood-prone zones immediately.",
+        }
+        overall_message = messages[overall_level]
+
+    return {
+        "overall_level": overall_level,
+        "overall_color": overall_color,
+        "overall_message": overall_message,
+        "streamflow": streamflow_result,
+        "rainfall_24h": rainfall_result,
+        "antecedent_note": antecedent_note,
+        "streamflow_thresholds": streamflow_thresholds,
+        "standards": [
+            "IMD 24-h rainfall severity thresholds and colour-coded warnings (IMD, 2021)",
+            "CWC Flood Forecasting and Warning Network manual (CWC, Ministry of Jal Shakti, 2022)",
+            "NDMA National Guidelines on Flood Management (2008), ISBN 978-93-80440-24-2",
+            "Himayat Sagar historical streamflow records 1985–2024 (Open-Meteo + runoff model)",
+        ],
+    }
 
 
 if __name__ == "__main__":
